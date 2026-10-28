@@ -1,112 +1,58 @@
-# logpilot-ingest-service — Log Ingestion API
+# LogPilot Ingest Service
 
-> **Receives log streams from collectors, validates payloads, and pushes them to Redis Streams for downstream processing.**
+Spring Boot API for validating batches of LogPilot events and publishing them to the local Redis Streams queue.
 
----
+## Implemented in the first iteration
 
-## 📋 Service Overview
+- `POST /api/v1/logs/ingest` accepts a JSON object with an `events` array.
+- Batch size is limited to 1–500 events.
+- Required fields: `service`, `level`, `timestamp`, and `message`.
+- Supported levels: `TRACE`, `DEBUG`, `INFO`, `WARN`, and `ERROR`.
+- Timestamps must be ISO-8601 date-times with an offset and are normalized to UTC.
+- `event_id` is an optional UUID. A missing ID is generated at ingestion time; clients should send stable IDs if they may retry.
+- `org_id` defaults to `demo`. This is a local demo value, not tenant isolation.
+- Unknown JSON properties are rejected.
+- Validation is atomic: an invalid event rejects the complete request.
+- Valid events are serialized as JSON in the `event` field of Redis stream `logpilot:logs`.
+- A successful response is HTTP 202 and means Redis accepted the events. It does not mean the processor has persisted them.
+- If Redis is unavailable, the API returns HTTP 503.
 
-| Property | Value |
-|----------|-------|
-| **Service Name** | `logpilot-ingest-service` |
-| **Technology** | Spring Boot 3.x, Java 21, Redis Streams |
-| **Type** | Backend Microservice |
-| **Port** | `8081` |
-| **Communication** | REST (inbound) → Redis Streams (outbound) |
-| **Team Owner** | Backend Engineer #1 |
-| **Build Priority** | Month 1, Week 3–4 |
+## Run locally
 
----
+Requirements: Java 21 and Redis. The LogPilot infrastructure repository provides local Redis/PostgreSQL Compose setup. From `logpilot-infra`, run `docker compose up -d redis`; then from this repository:
 
-## 🎯 Responsibilities
-
-1. **Bulk Log Ingestion** — `POST /api/v1/logs/ingest` accepts single or batched log events
-2. **Payload Validation** — Validate required fields (org_id, service, level, timestamp, message)
-3. **Rate Limiting** — Per-tenant rate limiting (configurable, default 10,000 events/min)
-4. **Collector Authentication** — Verify collector_key against registered services in PostgreSQL
-5. **Redis Streams Producer** — Push validated logs to Redis Stream `logpilot:logs:{org_id}`
-6. **Metrics Emission** — Track ingestion rate, validation failures, Redis write latency
-7. **Service Registration** — `POST /api/v1/services/register` for onboarding new services
-
----
-
-## 📦 Codebase Structure
-
-```
-logpilot-ingest-service/
-├── src/
-│   └── main/
-│       ├── java/com/logpilot/ingest/
-│       │   ├── IngestApplication.java              # Spring Boot entry point
-│       │   ├── config/
-│       │   │   ├── RedisConfig.java                # Redis connection + Streams setup
-│       │   │   ├── SecurityConfig.java             # Collector key authentication
-│       │   │   └── RateLimitConfig.java            # Per-tenant rate limits
-│       │   ├── controller/
-│       │   │   ├── LogIngestController.java         # POST /api/v1/logs/ingest
-│       │   │   └── ServiceRegistrationController.java # POST /api/v1/services/register
-│       │   ├── service/
-│       │   │   ├── LogValidationService.java        # Payload validation logic
-│       │   │   ├── RedisStreamProducer.java          # Write to Redis Streams
-│       │   │   └── ServiceRegistryService.java       # Manage registered services
-│       │   ├── model/
-│       │   │   ├── LogEvent.java                    # Inbound log event DTO
-│       │   │   ├── IngestResponse.java              # API response DTO
-│       │   │   └── ServiceRegistration.java         # Service registration entity
-│       │   ├── repository/
-│       │   │   └── ServiceRepository.java           # JPA repo for services table
-│       │   └── exception/
-│       │       ├── ValidationException.java
-│       │       └── RateLimitExceededException.java
-│       └── resources/
-│           ├── application.yml
-│           └── logback-spring.xml
-├── src/test/java/                                   # Unit & integration tests
-├── Dockerfile
-├── pom.xml
-└── README.md
+```sh
+sh ./mvnw spring-boot:run
 ```
 
----
+The service listens on port 8081 by default. Configure `REDIS_HOST` and `REDIS_PORT` to override the default `localhost:6379`.
 
-## 🔗 Dependencies
+## Request example
 
-| Dependency | Purpose |
-|------------|---------|
-| Spring Boot Starter Web | REST API endpoints |
-| Spring Boot Starter Data Redis | Redis Streams producer |
-| Spring Boot Starter Data JPA | PostgreSQL for service registry |
-| Spring Boot Starter Validation | Bean validation (Jakarta) |
-| Spring Boot Starter Actuator | Health checks, metrics |
-| PostgreSQL Driver | JDBC driver |
-| Micrometer + Prometheus | Metrics export |
-| Bucket4j | Rate limiting implementation |
-
----
-
-## 📡 API Endpoints
-
-### `POST /api/v1/logs/ingest`
-Bulk log ingestion — the primary entry point for all log data.
-
-**Request:**
-```json
-{
-  "events": [
-    {
-      "org_id": "acme-corp",
-      "service": "payment-service",
-      "level": "ERROR",
-      "timestamp": "2026-04-14T10:35:22Z",
-      "message": "DB connection timeout after 5000ms",
-      "trace_id": "abc-123-xyz",
-      "metadata": { "host": "pod-payment-7d9f", "env": "prod" }
-    }
-  ]
-}
+```sh
+curl --fail-with-body -X POST http://localhost:8081/api/v1/logs/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "events": [
+      {
+        "event_id": "0192f6e4-7d7a-7b03-a909-443f6f27c853",
+        "org_id": "demo",
+        "service": "checkout-api",
+        "level": "ERROR",
+        "timestamp": "2026-10-28T10:35:22.123Z",
+        "message": "Database connection timed out",
+        "trace_id": "trace-demo-001",
+        "metadata": {
+          "environment": "local",
+          "host": "developer-machine"
+        }
+      }
+    ]
+  }'
 ```
 
-**Response:**
+Successful response:
+
 ```json
 {
   "accepted": 1,
@@ -115,24 +61,8 @@ Bulk log ingestion — the primary entry point for all log data.
 }
 ```
 
-### `POST /api/v1/services/register`
-Register a new service to receive a collector_key.
+Validation errors return HTTP 400 with an `errors` list containing the batch index, field, and message. Redis errors return HTTP 503. Do not send secrets or sensitive production logs to this unauthenticated local-demo endpoint.
 
----
+## Not implemented yet
 
-## 🗄️ Database Tables Owned
-
-| Table | Purpose |
-|-------|---------|
-| `services` | Registered services (id, org_id, name, collector_key, created_at) |
-
----
-
-## ✅ Testing Checklist
-
-- [ ] Unit tests for LogValidationService (valid/invalid payloads)
-- [ ] Unit tests for RedisStreamProducer (mock Redis)
-- [ ] Integration test with embedded Redis: ingest → verify stream entry
-- [ ] Rate limit test: exceed threshold → 429 response
-- [ ] Load test: 10,000 events/second sustained for 5 minutes
-- [ ] Authentication test: invalid collector_key → 401
+Collector integrations, service registration/authentication, tenant isolation, rate limiting, PostgreSQL service registry, metrics/Actuator, Docker deployment, production request-size controls, and load testing remain future work. The README from the original project described a larger design; this section reflects the current code.
